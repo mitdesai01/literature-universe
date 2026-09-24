@@ -8,28 +8,43 @@ without filtering O_GROUP == 'detailed' double counts employment by roughly a fa
 three. Metro rows are AREA_TYPE 4, not 2.
 Expect: canonical/oews_national.parquet (about 830 occupations), oews_metro.parquet
 (about 141k rows), oews_industry.parquet (4-digit NAICS, about 83k rows).
+Finding the files: BLS names them oesm24nat.zip, oesm24ma.zip and oesm24in4.zip. They
+can sit in data/raw or any search folder, as "(1)" copies, or unzipped (a folder such as
+oesm24nat/, or the bare national_M2024_dl.xlsx); module 01 shows what was found.
 Diagnostics: total detailed employment should be close to the published US total
 (about 151m in May 2024); metro count should be near 390.
 """
+import io
+import re
 import zipfile
 from pathlib import Path
 import pandas as pd
-from polisy_core import CONFIG, paths, log, save
+from polisy_core import CONFIG, paths, log, save, locate, spec, members, missing_hint
 
-LEVELS = {"national": ("nat", "national_m"), "msa": ("ma", "msa_m"), "industry": ("in4", "nat4d_m")}
+LEVELS = {"national": ("OEWS_NATIONAL", "national_m"), "msa": ("OEWS_MSA", "msa_m"),
+          "industry": ("OEWS_INDUSTRY", "nat4d_m")}
 
 
-def read_level(raw: Path, year: int, level: str):
-    suffix, prefer = LEVELS[level]
-    zpath = raw / f"oesm{str(year)[2:]}{suffix}.zip"
-    if not zpath.exists():
-        log(f"OEWS {level} {year}: {zpath.name} not found in {raw}")
+def read_level(year: int, level: str):
+    key, prefer = LEVELS[level]
+    src = locate(key, year)["path"]
+    if src is None:
+        log(f"OEWS {level} {year}: {missing_hint(key, year)}")
         return None
-    with zipfile.ZipFile(zpath) as zf:
-        sheets = [n for n in zf.namelist() if n.lower().endswith((".xlsx", ".xls"))
-                  and "file_description" not in n.lower()]
-        member = next((n for n in sheets if prefer in Path(n).name.lower()), sheets[0])
-        df = pd.read_excel(zf.open(member), dtype=str)
+    names = members(src)
+    sheets = [n for low, n in names.items() if low.endswith((".xlsx", ".xls")) and "description" not in low]
+    exact = [n for low, n in names.items() if re.search(spec(key, year)["members"], low)]
+    member = next(iter(exact), None) or next((n for n in sheets if prefer in Path(n).name.lower()),
+                                             sheets[0] if sheets else None)
+    if member is None:
+        log(f"OEWS {level} {year}: no spreadsheet inside {src}")
+        return None
+    if src.suffix.lower() == ".zip":
+        with zipfile.ZipFile(src) as zf:
+            df = pd.read_excel(io.BytesIO(zf.read(member)), dtype=str)
+    else:
+        df = pd.read_excel(src / member if src.is_dir() else src, dtype=str)
+    log(f"OEWS {level} {year}: reading {Path(member).name} from {src.name}")
     df.columns = [c.strip().lower() for c in df.columns]
     for col in ("tot_emp", "a_median", "a_mean"):
         if col in df:
@@ -55,7 +70,7 @@ def read_level(raw: Path, year: int, level: str):
 def main():
     P = paths()
     for level in LEVELS:
-        frames = [read_level(P["RAW"], y, level) for y in CONFIG["OEWS_YEARS"]]
+        frames = [read_level(y, level) for y in CONFIG["OEWS_YEARS"]]
         frames = [f for f in frames if f is not None]
         if not frames:
             continue

@@ -10,15 +10,18 @@ Why: merges fail silently when keys are built inline. Building them once, with a
 score per row, makes every later join auditable.
 Expect: match rates near 97% for metros, 100% for occupations after dropping invalid
 codes, 71% for industries, and roughly 35% of Compustat firms for the name match.
+CBSA reference: the Census delineation file, List 1 (list1_2023.xlsx), found by
+polisy_core wherever it was saved and under whatever name ("list1_2023 (1).xlsx", an older
+list1_2020.xls, NBER's cbsa2fipsxw.csv). Its two title rows are skipped by finding the
+"CBSA Code" header. Without it the OEWS metro file stands in, which has no counties, so
+the election merge in module 06 is skipped.
 Diagnostics: review every metro row with match_score < 3 by hand once; check the firm
 match against DIPI (module 07).
 """
-import re
-from pathlib import Path
 import numpy as np
 import pandas as pd
-from polisy_core import (CONFIG, paths, con, log, save, q, sqlp, parse_msa, party_regime,
-                         norm_name, vr_view)
+from polisy_core import (paths, con, log, save, q, parse_msa, party_regime, norm_name, vr_view,
+                         locate, missing_hint, read_table, pick, norm_gvkey, cbsa_delineation)
 
 try:
     from rapidfuzz import fuzz, process
@@ -28,34 +31,43 @@ except ImportError:
 
 
 def cbsa_reference(P):
-    """Census delineation file if present, else the OEWS metro file (codes + titles)."""
-    delin = P["RAW"] / "list1_2023.xlsx"
-    if delin.exists():
-        raw = pd.read_excel(delin, skiprows=2, dtype=str)
-        raw.columns = [re.sub(r"\s+", "_", c.strip().lower()) for c in raw.columns]
-        code = next(c for c in raw.columns if c.startswith("cbsa_code"))
-        title = next(c for c in raw.columns if c.startswith("cbsa_title"))
-        typ = next((c for c in raw.columns if "metropolitan" in c and "division" not in c), None)
-        st = next((c for c in raw.columns if c.startswith("fips_state")), None)
-        cty = next((c for c in raw.columns if c.startswith("fips_county")), None)
-        d = raw.rename(columns={code: "cbsa", title: "cbsa_title", typ: "cbsa_type",
-                                st: "state_fips", cty: "county_fips3"})
-        d = d[d.cbsa.str.match(r"^\d{5}$", na=False)].copy()
-        if "state_fips" in d and "county_fips3" in d:
-            d["county_fips"] = d.state_fips.str.zfill(2) + d.county_fips3.str.zfill(3)
-            d[["cbsa", "county_fips"]].dropna().to_csv(P["KEYS"] / "cw_cbsa_county.csv", index=False)
-        log("CBSA reference: Census delineation file")
-        return d[["cbsa", "cbsa_title"]].drop_duplicates()
+    """Census delineation file wherever it is, else the OEWS metro file (codes + titles)."""
+    try:
+        got = cbsa_delineation()
+    except ValueError as e:
+        log(f"CBSA reference file unusable: {e}")
+        got = None
+    if got is not None:
+        cbsa, county = got
+        src = locate("CBSA_REFERENCE")["path"]
+        if county is not None:
+            county.to_csv(P["KEYS"] / "cw_cbsa_county.csv", index=False)
+            log(f"CBSA reference: {src.name}, {len(cbsa):,} CBSAs, {len(county):,} counties -> keys/cw_cbsa_county.csv")
+        else:
+            log(f"CBSA reference: {src.name} has no county codes (List 2?); election merges need List 1")
+        return cbsa[["cbsa", "cbsa_title"]]
     oews = P["CANONICAL"] / "oews_msa.parquet"
     if oews.exists():
         d = pd.read_parquet(oews, columns=["cbsa", "area_title"]).drop_duplicates()
-        log("CBSA reference: OEWS metro file (no county links; election merges need the Census file)")
+        log("CBSA reference: OEWS metro file (no county links; election merges need the Census file). "
+            + missing_hint("CBSA_REFERENCE"))
         return d.rename(columns={"area_title": "cbsa_title"})
-    log("no CBSA reference available")
+    log("no CBSA reference available. " + missing_hint("CBSA_REFERENCE"))
     return None
 
 
 def build_metro_crosswalk(P, vr_msa_names, ref):
+    names = pd.Series(vr_msa_names).dropna().astype(str).str.strip()
+    if len(names) and names.str.fullmatch(r"\d{5}").all():       # the panel already carries CBSA codes
+        cw = pd.DataFrame({"msa": names.unique()})
+        cw = cw.merge(ref.rename(columns={"cbsa": "msa"}), on="msa", how="left")
+        cw["cbsa"] = cw.msa.where(cw.cbsa_title.notna())
+        cw["match_score"] = np.where(cw.cbsa.notna(), 4, 0)
+        cw["state"] = cw.cbsa_title.map(lambda t: (parse_msa(t)[1] or [None])[0] if isinstance(t, str) else None)
+        cw["party_regime"] = cw.state.map(party_regime)
+        cw.to_csv(P["KEYS"] / "cw_msa_cbsa.csv", index=False)
+        log(f"metro crosswalk: codes, {cw.cbsa.notna().mean():.1%} found in the CBSA reference")
+        return cw
     parsed = ref.cbsa_title.map(parse_msa)
     ref = ref.assign(cities=[p[0] for p in parsed], states=[p[1] for p in parsed])
     by_state = {}
@@ -82,9 +94,17 @@ def build_metro_crosswalk(P, vr_msa_names, ref):
 
 def build_firm_crosswalk(P, c, year, min_workers=25, min_score=90):
     """Name match VRscores employers to Compustat gvkeys, with size and timing evidence."""
-    comp = pd.read_csv(CONFIG["COMPUSTAT"], usecols=["gvkey", "fyear", "conm", "state", "emp"], low_memory=False)
+    loc = locate("COMPUSTAT")
+    comp = read_table(loc["path"], loc["member"], header_hint="gvkey",
+                      columns={"gvkey", "fyear", "conm", "state", "emp"})
+    comp = comp.rename(columns={pick(comp, k): k for k in ("gvkey", "fyear", "conm", "state", "emp")
+                                if pick(comp, k) is not None})
+    for k in ("state", "emp"):
+        if k not in comp:
+            comp[k] = None
+    comp["fyear"] = pd.to_numeric(comp.fyear, errors="coerce")
     comp = comp[comp.fyear == year].dropna(subset=["conm"]).drop_duplicates("gvkey")
-    comp["gvkey"] = comp.gvkey.astype(str).str.zfill(6)
+    comp["gvkey"] = norm_gvkey(comp.gvkey)
     comp["name_norm"] = comp.conm.map(norm_name)
     emp = q(c, f"""SELECT unit AS vrid, company_name, workers, tp FROM vr_employer
                    WHERE year = {year} AND workers >= {min_workers}""")
@@ -150,8 +170,11 @@ def main(year=2015):
         ind["naics4"] = ind.naics6.str.zfill(6).str[:4]
         ind.to_csv(P["KEYS"] / "cw_industry.csv", index=False)
         log(f"industry crosswalk: {ind.naics4.nunique()} four-digit industries")
-    if Path(CONFIG["COMPUSTAT"]).exists() and (P["CANONICAL"] / "vr_employer.parquet").exists():
-        build_firm_crosswalk(P, c, year)
+    if (P["CANONICAL"] / "vr_employer.parquet").exists():
+        if locate("COMPUSTAT")["path"] is not None:
+            build_firm_crosswalk(P, c, year)
+        else:
+            log("firm crosswalk skipped. " + missing_hint("COMPUSTAT"))
     return True
 
 

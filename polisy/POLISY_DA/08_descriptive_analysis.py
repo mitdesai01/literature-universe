@@ -27,8 +27,10 @@ def main():
             vr_view(c, f"vr_{kind}", pq, kind)
 
     occ = P["PANELS"] / "occupation_year.parquet"
-    if occ.exists():
-        o = pd.read_parquet(occ)
+    o = pd.read_parquet(occ) if occ.exists() else None
+    if o is not None and "tot_emp" not in o:
+        log("coverage by occupation skipped: the occupation panel has no OEWS employment (module 03 found no OEWS files)")
+    elif o is not None:
         last = o[o.year == o.year.max()].dropna(subset=["tot_emp"]).copy()
         last = last[(last.tot_emp >= 5000) & (last.tp >= 500)]
         last["vr_share"] = last.tp / last.tp.sum()

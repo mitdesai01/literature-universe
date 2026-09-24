@@ -7,13 +7,16 @@ threshold. (5) The name-matched firm panel validated against DIPI employee liber
 Why: gate 5 is the important one. It tells you how much the name match costs relative to
 the proper crosswalk, in the only currency that matters, agreement with a known measure.
 Expect: output/tables/07_validation.csv with a pass or fail per gate.
+DIPI comes from canonical/dipi.parquet (built by polisy_core.load_dipi, in module 01 or
+here): found under any file name, gvkeys zero-padded on both sides, and the measure is
+CONFIG["DIPI_MEASURE"] (empLiberalism_10yr) or the closest employee-liberalism column.
 Diagnostics: gate 5 should land near r = 0.45 to 0.50 for firms with 200+ matched
 workers. The authors report 0.51 using the licensed crosswalk.
 """
 from pathlib import Path
 import numpy as np
 import pandas as pd
-from polisy_core import CONFIG, paths, con, log, save, q, vr_view
+from polisy_core import CONFIG, paths, con, log, save, q, vr_view, load_dipi, dipi_measure, norm_gvkey
 
 CODEBOOK = {2012: 370426, 2013: 393571, 2014: 417604, 2015: 439982, 2016: 461191, 2017: 482144,
             2018: 502104, 2019: 516553, 2020: 525013, 2021: 535238, 2022: 539944, 2023: 540676,
@@ -53,25 +56,32 @@ def main():
                           "threshold": "report alongside results", "pass": True})
 
     firm = P["PANELS"] / "firm_year.parquet"
-    if firm.exists() and Path(CONFIG["DIPI"]).exists():
+    if not firm.exists():
+        log("DIPI gates skipped: panels/firm_year.parquet missing (modules 04 and 06 build it)")
+    d = load_dipi() if firm.exists() else None
+    measure = dipi_measure(d) if d is not None else None
+    if firm.exists() and d is not None and measure is None:
+        log(f"DIPI has no liberalism column; set CONFIG['DIPI_MEASURE'] to one of {list(d.columns)[:20]}")
+    if firm.exists() and measure is not None:
         f = pd.read_parquet(firm)
-        d = pd.read_csv(CONFIG["DIPI"], usecols=["gvkey", "year", "empLiberalism_10yr"], low_memory=False)
-        d["gvkey"] = d.gvkey.astype(str).str.zfill(6)
-        f["gvkey"] = f.gvkey.astype(str).str.zfill(6)
-        m = f.merge(d, on=["gvkey", "year"], how="inner").dropna(subset=["empLiberalism_10yr", "rep_share"])
+        f["gvkey"] = norm_gvkey(f.gvkey)
+        d = d[["gvkey", "year", measure]].rename(columns={measure: "dipi"})
+        m = f.merge(d, on=["gvkey", "year"], how="inner").dropna(subset=["dipi", "rep_share"])
         m["vr_dem_share"] = 1 - m.rep_share
+        mid = 0.0 if m.dipi.min() < 0 else 0.5          # DIPI midpoint: 0 on a -1..1 scale, .5 on a share
+        log(f"DIPI check on '{measure}': {len(m):,} matched firm-years, midpoint {mid}")
         if len(m) > 50:
-            r_all = m.vr_dem_share.corr(m.empLiberalism_10yr)
+            r_all = m.vr_dem_share.corr(m.dipi)
             big = m[m.workers >= 200]
-            r_big = big.vr_dem_share.corr(big.empLiberalism_10yr) if len(big) > 50 else np.nan
-            agree = ((m.vr_dem_share > .5) == (m.empLiberalism_10yr > .5)).mean()
+            r_big = big.vr_dem_share.corr(big.dipi) if len(big) > 50 else np.nan
+            agree = ((m.vr_dem_share > .5) == (m.dipi > mid)).mean()
             gates.append({"gate": "name match vs DIPI (all matched firms)", "value": f"r = {r_all:.3f}, n = {len(m):,}",
                           "threshold": "r > 0.35", "pass": bool(r_all > 0.35)})
             gates.append({"gate": "name match vs DIPI (200+ workers)", "value": f"r = {r_big:.3f}, n = {len(big):,}",
                           "threshold": "r > 0.45 (authors: 0.51)", "pass": bool(r_big > 0.45)})
             gates.append({"gate": "same majority party", "value": f"{agree:.1%}",
                           "threshold": "> 60% (authors: 73%)", "pass": bool(agree > 0.60)})
-    out = save(pd.DataFrame(gates), "07_validation")
+    out = save(pd.DataFrame(gates, columns=["gate", "value", "threshold", "pass"]), "07_validation")
     failed = out[~out["pass"]]
     log("all gates passed" if failed.empty else f"FAILED gates: {', '.join(failed.gate)}")
     return out

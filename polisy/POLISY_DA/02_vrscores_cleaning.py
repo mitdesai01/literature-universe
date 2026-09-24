@@ -7,13 +7,16 @@ Why: the employer panel is 6.26m rows; Parquet plus DuckDB makes every later que
 seconds rather than minutes, and pandas never sees the whole thing.
 Expect: data/canonical/vr_employer.parquet (about 450 MB), vr_metro, vr_industry,
 vr_occupation, and output/tables/02_vr_year_counts.csv.
+Finding the files: all four panels download as dataverse_files.zip, so they are told
+apart by the files inside (employer_panel_year_*, msa_panel_year_*, naics_panel_year_*,
+occupation_panel_year_*), not by name. Renamed zips, "(1)" copies and unzipped folders
+all work; module 01 shows which file each panel came from.
 Diagnostics: year counts against the codebook; duplicate unit-year rows must be zero;
 occupation codes that are not SOC-shaped ("Retired", "unknown", "On Leave") are reported
 and dropped downstream, not here.
 """
 import pandas as pd
-from pathlib import Path
-from polisy_core import CONFIG, paths, con, log, save, zip_to_parquet, vr_view, q, sqlp
+from polisy_core import FILES, paths, con, log, save, locate, missing_hint, panel_to_parquet, vr_view, q
 
 PANELS = {"employer": "VR_EMPLOYER", "metro": "VR_MSA",
           "industry": "VR_INDUSTRY", "occupation": "VR_OCCUPATION"}
@@ -24,11 +27,11 @@ def main():
     c = con()
     out = {}
     for kind, key in PANELS.items():
-        src = CONFIG[key]
-        if not str(src) or not Path(str(src)).exists():
-            log(f"{kind}: source missing, skipped")
+        src = locate(key)["path"]
+        if src is None:
+            log(f"{kind}: skipped. {missing_hint(key)}")
             continue
-        pq = zip_to_parquet(c, src, P["CANONICAL"] / f"vr_{kind}.parquet")
+        pq = panel_to_parquet(c, src, P["CANONICAL"] / f"vr_{kind}.parquet", FILES[key]["members"])
         out[kind] = pq
         vr_view(c, f"vr_{kind}", pq, kind)
         dup = q(c, f"SELECT count(*) - count(DISTINCT (unit, year)) AS dups FROM vr_{kind}").iloc[0, 0]
