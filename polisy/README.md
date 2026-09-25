@@ -16,3 +16,9 @@ Every input is declared once, in `FILES` in `polisy_core.py`: what it is, the na
 Module 01 (or `show_files()`) prints which file each input resolved to and how it was found. Inputs it cannot find are listed with their download name and source. When two different files fit equally well, it reports `AMBIGUOUS`.
 
 The checklist of file names to double-check at each step: https://claude.ai/code/artifact/1aa6867a-4183-4491-a34a-c7f41a86be48
+
+## POLISY lab
+
+`lab/` extends the pipeline into a research lab on Political Ideology × AI × Innovation: it links VRscores to AI
+exposure (AIOE, DAIOE), IRS migration and state policy (CSPP), grades every finding and writes an interactive site for
+GitHub Pages. Start with `lab/notebooks/POLISY_AI_Innovation_Lab.ipynb`; `lab/docs/TECHNICAL_REPORT.md` explains it.
