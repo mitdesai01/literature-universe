@@ -73,7 +73,7 @@ try:
 except ImportError as e:  # pragma: no cover
     raise SystemExit("polisy_triangulate needs duckdb: run  pip install duckdb  first") from e
 
-__version__ = "1.0 (2026-10-14)"
+__version__ = "1.1 (2026-10-20)"
 
 # ----------------------------------------------------------------------------------------------- settings
 SETTINGS = {
