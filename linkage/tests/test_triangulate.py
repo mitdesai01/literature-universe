@@ -164,6 +164,21 @@ checks["a decision round makes version 2"] = len(pd.read_csv(out / "linkage_log.
 checks["beta resolved by hand: its own firm by name and size, the other rejected"] = (
     typ("v_beta", "022222") == ["name_and_size"] and typ("v_beta", "033333") == ["rejected"])
 
+# overview of every link, and decisions recorded in it
+ov = tri.export_overview(paths=PATHS)
+wb = load_workbook(ov)
+checks["overview has its four sheets"] = wb.sheetnames == ["How to read", "Summary", "All links", "By firm"]
+ws = wb["All links"]
+checks["overview lists every link"] = ws.max_row - 1 == len(links)
+head = [c.value for c in ws[1]]
+iv, ig, ia = head.index("vrid") + 1, head.index("gvkey") + 1, head.index("accept") + 1
+for r in range(2, ws.max_row + 1):
+    if ws.cell(r, iv).value == "v_delta_tx":
+        ws.cell(r, ia, value=0)
+wb.save(out / "hand_decisions_3.xlsx")
+links = tri.build_links(paths=PATHS, note="overview decision")
+checks["a decision typed in the overview is read"] = typ("v_delta_tx") == ["rejected"]
+
 # ---------------------------------------------------------------- step B, C
 key = tri.draw_audit(paths=PATHS, n=12)
 checks["audit drew 12 links (or all, when fewer)"] = len(key) == min(12, int((links.set_strict | links.set_main | links.set_broad | links.set_baseline).sum()))

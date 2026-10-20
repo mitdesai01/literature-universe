@@ -73,7 +73,7 @@ try:
 except ImportError as e:  # pragma: no cover
     raise SystemExit("polisy_triangulate needs duckdb: run  pip install duckdb  first") from e
 
-__version__ = "1.1 (2026-10-20)"
+__version__ = "1.2 (2026-10-20)"
 
 # ----------------------------------------------------------------------------------------------- settings
 SETTINGS = {
@@ -465,7 +465,7 @@ def _decision_files(P):
 def _read_decisions(f):
     if f.suffix.lower() == ".xlsx":
         book = pd.ExcelFile(f)
-        sheet = "Review" if "Review" in book.sheet_names else book.sheet_names[0]
+        sheet = next((s for s in ("Review", "All links") if s in book.sheet_names), book.sheet_names[0])
         d = book.parse(sheet, dtype=str)
     else:
         d = pd.read_csv(f, dtype=str)
@@ -989,6 +989,154 @@ T2_selection.csv       linked versus unlinked firms on size, industry, patents a
 workforce_<set>.csv/.dta  firm-year VRscores workforce for each link set (made after the freeze), for the sensitivity models
 linkage_sensitivity.do Stata template that runs the thesis model once per link set
 """)
+
+
+# ----------------------------------------------------------------------------------------------- overview of every link
+OVERVIEW_COLUMNS = [
+    ("vrid", "vrid", 19), ("gvkey", "gvkey", 9), ("accept", "accept", 8), ("decided_by", "decided_by", 11), ("note", "note", 28),
+    ("type_label", "how the link was confirmed", 30), ("match_type", "match type", 18), ("sets", "link sets", 20),
+    ("vr_name", "VRscores employer", 34), ("name_norm", "cleaned name", 26),
+    ("vr_workers_max", "VRscores matched workers (largest year)", 13), ("vr_years", "VRscores years", 11),
+    ("vr_same_name_n", "VRscores employers with this cleaned name", 11), ("vr_name_dominance", "this employer's share of them", 10),
+    ("comp_name_match_year", "Compustat company (2015)", 32), ("comp_name", "Compustat company (latest)", 32),
+    ("comp_state", "state", 7), ("comp_emp_match_year", "Compustat employees 2015 (thousands)", 12),
+    ("r1_tier", "name-match tier", 9), ("r1_method", "name-match method", 9), ("r1_score", "name-match score", 8),
+    ("pr_example_assignee", "patent owner with this name", 30), ("pr_total", "its patents 2008-2021", 9),
+    ("pr_linked", "of which DISCERN links to a listed firm", 10), ("pr_owner", "DISCERN owner gvkey", 9),
+    ("pr_owner_name", "DISCERN owner", 30), ("pr_owner_share", "owner's share", 8), ("dn_gvkey", "DISCERN name list: gvkey", 9),
+    ("size_status", "size trajectory", 22), ("size_years", "years compared", 8), ("size_ratio_median", "VRscores/Compustat size (median)", 10),
+    ("size_max_jump", "largest yearly jump (x)", 8), ("size_corr", "co-movement (corr.)", 8),
+    ("e1", "E1 name", 6), ("e2", "E2 patents", 6), ("e3", "E3 DISCERN names", 6), ("e4", "E4 size", 6),
+]
+TYPE_FILL = {"triangulated_patents": "C6EFCE", "triangulated_names": "D9EAD3", "name_and_size": "E2EFDA",
+             "discern_and_size": "DDEBF7", "hand_accepted": "FFF2CC", "single_source": "FCE4D6", "conflict": "FFC7CE",
+             "superseded": "EDEDED", "rejected": "EDEDED"}
+
+
+def export_overview(base=None, paths=None, name="all_links_overview.xlsx"):
+    """Every candidate link, with the cleaned names and all the evidence, in one Excel workbook to read, filter and check
+    by hand (sheets: How to read, Summary, All links, By firm). Reads only the frozen links: nothing political.
+    To record decisions made while reading it, fill accept (1/0) in 'All links' and save a copy in POLISY/linkage as
+    hand_decisions_<n>.xlsx; build_links() reads it like the review list."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    P = _paths(base, paths)
+    out = P["out"]
+    proto = _frozen(out)
+    L = _read_links(out)
+    L["type_label"] = L.match_type.map(TYPE_LABELS)
+    L["sets"] = L.apply(lambda r: ", ".join(s for s in SETS if r[f"set_{s}"]) or "none", axis=1)
+    L["vr_years"] = L.vr_first_year.astype("Int64").astype(str) + "-" + L.vr_last_year.astype("Int64").astype(str)
+    order = {t: i for i, t in enumerate(TYPES)}
+    L = L.assign(_o=L.match_type.map(order)).sort_values(["_o", "vr_workers_max", "vrid", "gvkey"],
+                                                          ascending=[True, False, True, True])
+    f, fb = Font(name="Arial", size=10), Font(name="Arial", size=10, bold=True)
+    wb = Workbook()
+    hw = wb.active
+    hw.title = "How to read"
+    text = [("Every VRscores-to-Compustat link, with the evidence behind it", Font(name="Arial", size=13, bold=True)),
+            ("Prepared for the Research Team", f),
+            (f"Links version {proto['version']} (hash {proto['links_sha256'][:12]}), built {proto['created'][:10]}; "
+             f"code {proto['code']}", f), ("", f),
+            ("One row per candidate pair (one VRscores employer, one Compustat firm). Colour = how the link was confirmed.", f),
+            ("E1 name: the employer's name equals the firm's Compustat name (module 04), unique on both sides.", f),
+            ("E2 patents: the name equals a patent owner's, and DISCERN gives >= 80% of that owner's 2008-2021 patents to this firm.", f),
+            ("E3 DISCERN names: the name is on DISCERN's list of this firm's names and subsidiaries only.", f),
+            ("E4 size: VRscores matched workers and Compustat employees fit (ratio 0.2%-150%, no 3x jump, no opposite movement).", f),
+            ("Link sets: strict = E1 and E2; main = two independent sources (Compustat names, DISCERN, size); "
+             "broad = main + hand-accepted + one-source high-tier links; baseline = today's module 04 rule.", f), ("", f),
+            ("Use the filters in the header row (e.g. match type, link sets, state). 'By firm' gives one row per Compustat firm.", f),
+            ("Checking by hand: fill accept (1 = same company or a subsidiary it owned in 2012-2021, 0 = not) only where you "
+             "disagree with the code, then save a copy in POLISY/linkage as hand_decisions_<n>.xlsx and run build_links() again.", f),
+            ("Judge identity only: names, sizes, websites, 10-K subsidiary lists. This file contains no political data.", f)]
+    for i, (s, font) in enumerate(text, start=1):
+        hw.cell(row=i, column=1, value=s).font = font
+    hw.column_dimensions["A"].width = 140
+
+    sw = wb.create_sheet("Summary")
+    r0 = 1
+    for title, fname in (("Match types", "T1_match_types.csv"), ("Link sets", "T1b_link_sets.csv"),
+                         ("Do independent sources agree?", "T3_agreement.csv")):
+        if not (out / fname).exists():
+            continue
+        tab = pd.read_csv(out / fname)
+        sw.cell(row=r0, column=1, value=title).font = Font(name="Arial", size=11, bold=True)
+        for j, c in enumerate(tab.columns, start=1):
+            sw.cell(row=r0 + 1, column=j, value=str(c)).font = fb
+        for i, row in enumerate(tab.itertuples(index=False), start=r0 + 2):
+            for j, v in enumerate(row, start=1):
+                if isinstance(v, float):
+                    v = None if math.isnan(v) else round(v, 4)
+                sw.cell(row=i, column=j, value=v).font = f
+        r0 += len(tab) + 4
+    sw.column_dimensions["A"].width = 60
+    for j in range(2, 14):
+        sw.column_dimensions[get_column_letter(j)].width = 14
+
+    ws = wb.create_sheet("All links")
+    for j, (_, head, width) in enumerate(OVERVIEW_COLUMNS, start=1):
+        c = ws.cell(row=1, column=j, value=head)
+        c.font, c.alignment = fb, Alignment(wrap_text=True, vertical="top")
+        ws.column_dimensions[get_column_letter(j)].width = width
+    fills = {k: PatternFill("solid", fgColor=v) for k, v in TYPE_FILL.items()}
+    keys = [k for k, _, _ in OVERVIEW_COLUMNS]
+    for i, row in enumerate(L.itertuples(index=False), start=2):
+        fill = fills.get(row.match_type)
+        for j, k in enumerate(keys, start=1):
+            v = getattr(row, k) if k in L.columns else None
+            if isinstance(v, float):
+                v = None if math.isnan(v) else (int(v) if k in ("vr_workers_max", "pr_total", "pr_linked", "vr_same_name_n",
+                                                                 "size_years") else round(v, 3))
+            if isinstance(v, (bool, np.bool_)):
+                v = "yes" if v else ""
+            if k in ("vrid", "gvkey", "pr_owner", "dn_gvkey") and v is not None:
+                v = str(v)
+            c = ws.cell(row=i, column=j, value=v)
+            c.font = f
+            if k in ("vrid", "gvkey", "pr_owner", "dn_gvkey"):
+                c.number_format = "@"
+            if fill is not None and k in ("type_label", "match_type"):
+                c.fill = fill
+    ws.freeze_panes = "F2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(keys))}{len(L) + 1}"
+
+    fw = wb.create_sheet("By firm")
+    use = L[L.match_type.ne("rejected")]
+    g = use.groupby("gvkey")
+    firm = pd.DataFrame({
+        "gvkey": g.size().index,
+        "Compustat company": g.comp_name_match_year.first().fillna(g.comp_name.first()).values,
+        "state": g.comp_state.first().values,
+        "VRscores employers": g.vrid.nunique().values,
+        "matched workers (largest year, summed)": g.vr_workers_max.sum().round(0).values,
+        "employer names": g.vr_name.apply(lambda s: "; ".join(sorted(set(map(str, s.dropna())))[:12])).values,
+        "match types": g.match_type.apply(lambda s: ", ".join(f"{t} {n}" for t, n in s.value_counts().items())).values,
+        "in strict": g.set_strict.any().map({True: "yes", False: ""}).values,
+        "in main": g.set_main.any().map({True: "yes", False: ""}).values,
+        "in broad": g.set_broad.any().map({True: "yes", False: ""}).values,
+        "in baseline": g.set_baseline.any().map({True: "yes", False: ""}).values,
+    }).sort_values("matched workers (largest year, summed)", ascending=False)
+    widths = [9, 34, 7, 10, 14, 70, 40, 8, 8, 8, 9]
+    for j, (c, w) in enumerate(zip(firm.columns, widths), start=1):
+        cell = fw.cell(row=1, column=j, value=c)
+        cell.font, cell.alignment = fb, Alignment(wrap_text=True, vertical="top")
+        fw.column_dimensions[get_column_letter(j)].width = w
+    for i, row in enumerate(firm.itertuples(index=False), start=2):
+        for j, v in enumerate(row, start=1):
+            if isinstance(v, float) and math.isnan(v):
+                v = None
+            c = fw.cell(row=i, column=j, value=str(v) if j == 1 else v)
+            c.font = f
+            if j == 1:
+                c.number_format = "@"
+    fw.freeze_panes = "C2"
+    fw.auto_filter.ref = f"A1:{get_column_letter(len(firm.columns))}{len(firm) + 1}"
+    path = out / name
+    wb.save(path)
+    log(f"overview: {len(L):,} links and {len(firm):,} firms in {path}")
+    return path
 
 
 # ----------------------------------------------------------------------------------------------- step B: the hand audit
