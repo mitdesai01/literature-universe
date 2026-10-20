@@ -727,6 +727,9 @@ def build_links(base=None, paths=None, settings=None, note=""):
 
         # conflicts and hand decisions, employer by employer
         has_ev = df.e1 | df.e2 | df.e3 | df.hand.eq(1)
+        # an employer reaching two firms is a conflict whether the pairs have strong evidence or come from module 04's
+        # high tier only (e.g. a parent and its operating subsidiary with the same cleaned name, both in Compustat)
+        has_ev = has_ev | (df.r1_tier.eq("high") & df.hand.ne(0))
         nfirms = df[has_ev].groupby("vrid").gvkey.nunique()
         df["employer_firms"] = df.vrid.map(nfirms).fillna(0).astype(int)
         acc = df[df.hand.eq(1)].groupby("vrid").gvkey.nunique()
